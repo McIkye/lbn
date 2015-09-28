@@ -4,6 +4,12 @@
 * Luiz Henrique de Figueiredo <lhf@tecgraf.puc-rio.br>
 * 11 Nov 2010 22:56:45
 * This code is hereby placed in the public domain.
+*
+* 28 Sep 2015 17:14:03
+* Michael Shalayeff <mickey@lucifier.ent>
+* Whack the functions into mathematical sanity.
+* Optimise for ops where second arg is a simple number.
+* Implement optional modulo ops with modulo inheritance.
 */
 
 #include <stdlib.h>
@@ -16,36 +22,44 @@
 #include "lua.h"
 #include "lauxlib.h"
 
-#define lua_boxpointer(L,u) \
-	(*(void **)(lua_newuserdata(L, sizeof(void *))) = (u))
-
 #define MYNAME		"bn"
-#define MYVERSION	MYNAME " library for " LUA_VERSION " / Nov 2010 / "\
+#define MYVERSION	MYNAME " library for " LUA_VERSION " / Sep 2015 / "\
 			"based on OpenSSL " SHLIB_VERSION_NUMBER
 #define MYTYPE		MYNAME " bignumber"
 
-#ifndef BN_is_negative
-#define BN_is_negative(a) ((a)->neg != 0)
+struct Bnum {
+	BIGNUM *a;
+	BIGNUM *m;
+};
+
+#ifndef BN_is_neg
+#define BN_is_neg(a)	((a)->neg != 0)
 #endif
 
-static BN_CTX *ctx=NULL;
+static BN_CTX *ctx;
 
-static void error(lua_State *L, const char *message)
+int
+Berror(lua_State *L, const char *message)
 {
- luaL_error(L,"(bn) %s %s",message,ERR_reason_error_string(ERR_get_error()));
+	return luaL_error(L, "(bn) %s %s",
+	    message, ERR_reason_error_string(ERR_get_error()));
 }
 
-static BIGNUM *Bnew(lua_State *L)
+struct Bnum *
+Bnew(lua_State *L)
 {
- BIGNUM *x=BN_new();
- if (x==NULL) error(L,"BN_new failed");
- lua_boxpointer(L,x);
- luaL_getmetatable(L,MYTYPE);
- lua_setmetatable(L,-2);
- return x;
+	struct Bnum *bn = lua_newuserdata(L, sizeof *bn);
+
+	if (!(bn->a = BN_new()))
+		return Berror(L,"BN_new failed");
+
+	luaL_getmetatable(L,MYTYPE);
+	lua_setmetatable(L,-2);
+	return x;
 }
 
-static BIGNUM *Bget(lua_State *L, int i)
+struct Bnum *
+Bget(lua_State *L, int i)
 {
  switch (lua_type(L,i))
  {
@@ -64,20 +78,22 @@ static BIGNUM *Bget(lua_State *L, int i)
  return NULL;
 }
 
-static int Bbits(lua_State *L)			/** bits(x) */
+int
+Blen(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- lua_pushinteger(L,BN_num_bits(a));
- return 1;
+	BIGNUM *a = Bget(L,1)->a;
+	lua_pushinteger(L, BN_num_bits(a));
+	return 1;
 }
 
-static int Btostring(lua_State *L)		/** tostring(x) */
+int
+Btostr(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- char *s=BN_bn2dec(a);
- lua_pushstring(L,s);
- OPENSSL_free(s);
- return 1;
+	BIGNUM *a = Bget(L, 1)->a;
+	char *s = BN_bn2dec(a);
+	lua_pushstring(L, s);
+	OPENSSL_free(s);
+	return 1;
 }
 
 static int Btohex(lua_State *L)			/** tohex(x) */
@@ -101,27 +117,6 @@ static int Btotext(lua_State *L)		/** totext(x) */
  return 1;
 }
 
-static int Btonumber(lua_State *L)		/** tonumber(x) */
-{
- Btostring(L);
- lua_pushnumber(L,lua_tonumber(L,-1));
- return 1;
-}
-
-static int Biszero(lua_State *L)		/** iszero(x) */
-{
- BIGNUM *a=Bget(L,1);
- lua_pushboolean(L,BN_is_zero(a));
- return 1;
-}
-
-static int Bisone(lua_State *L)			/** isone(x) */
-{
- BIGNUM *a=Bget(L,1);
- lua_pushboolean(L,BN_is_one(a));
- return 1;
-}
-
 static int Bisodd(lua_State *L)			/** isodd(x) */
 {
  BIGNUM *a=Bget(L,1);
@@ -129,59 +124,62 @@ static int Bisodd(lua_State *L)			/** isodd(x) */
  return 1;
 }
 
-static int Bisneg(lua_State *L)			/** isneg(x) */
+int
+Beq(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- lua_pushboolean(L,BN_is_negative(a));
- return 1;
+	BIGNUM *a = Bget(L,1)->a;
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		if (n == 0)
+ 			lua_pushboolean(L, BN_is_zero(a));
+		else if (n == 1)
+ 			lua_pushboolean(L, BN_is_one(a));
+		else
+ 			lua_pushboolean(L, BN_is_word(a, n));
+	} else {
+		BIGNUM *b = Bget(L,2)->a;
+		lua_pushboolean(La, BN_cmp(a, b) == 0);
+	}
+	return 1;
 }
 
-static int Bnumber(lua_State *L)		/** number(x) */
+int
+Blt(lua_State *L)
 {
- Bget(L,1);
- lua_settop(L,1);
- return 1;
+	BIGNUM *a = Bget(L,1)->a;
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		if (n == 0)
+ 			lua_pushboolean(L, BN_is_neg(a));
+		else if (n == 1)
+ 			lua_pushboolean(L, BN_is_neg(a) || BN_is_zero(a));
+		else
+			;	// TODO
+	} else {
+		BIGNUM *b = Bget(L, 2)->a;
+		lua_pushboolean(L, BN_cmp(a, b) < 0);
+	}
+	return 1;
 }
 
-static int Btext(lua_State *L)			/** text(t) */
+int
+Ble(lua_State *L)
 {
- size_t l;
- const char *s=luaL_checklstring(L,1,&l);
- BIGNUM *x=Bnew(L);
- BN_bin2bn((const unsigned char *)s,l,x);
- return 1;
-}
-
-static int Bcompare(lua_State *L)		/** compare(x,y) */
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- lua_pushinteger(L,BN_cmp(a,b));
- return 1;
-}
-
-static int Beq(lua_State *L)
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- lua_pushboolean(L,BN_cmp(a,b)==0);
- return 1;
-}
-
-static int Blt(lua_State *L)
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- lua_pushboolean(L,BN_cmp(a,b)<0);
- return 1;
-}
-
-static int Bsqr(lua_State *L)			/** sqr(x) */
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *c=Bnew(L);
- BN_sqr(c,a,ctx);
- return 1;
+	BIGNUM *a = Bget(L,1)->a;
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		if (n == 0)
+ 			lua_pushboolean(L, BN_is_neg(a) || BN_is_zero(a));
+		else if (n == 1)
+ 			lua_pushboolean(L,
+			    BN_is_neg(a) || BN_is_zero(a) || BN_is_one(a));
+		else
+			;	// TODO
+	} else {
+		BIGNUM *b = Bget(L, 2)->a;
+		lua_pushboolean(L, BN_cmp(a, b) <= 0);
+	}
+	return 1;
 }
 
 static int Bneg(lua_State *L)			/** neg(x) */
@@ -198,7 +196,7 @@ static int Bneg(lua_State *L)			/** neg(x) */
 static int Babs(lua_State *L)			/** abs(x) */
 {
  BIGNUM *b=Bget(L,1);
- if (BN_is_negative(b))
+ if (BN_is_neg(b))
  {
   BIGNUM A;
   BIGNUM *a=&A;
@@ -210,42 +208,165 @@ static int Babs(lua_State *L)			/** abs(x) */
  return 1;
 }
 
-static int Badd(lua_State *L)			/** add(x,y) */
+int
+Blsh(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_add(c,a,b);
- return 1;
+	struct Bnum *bn = Bget(L, 1);
+	BIGNUM *a = bn->a;
+	struct Bnum *r = Bnew(L);
+	lua_Number n = lua_tonumber(L, 2);
+
+	if (bn->m && !(r->m = BN_dup(bn->m))
+		return Berror(L, "BN_dup failed");
+
+	if (!(n == 1? BN_lshift1(r->a, a) : BN_lshift(r->a, a, n)))
+		return Berror(L, "BN_lshift");
+
+	return 1;
 }
 
-static int Bsub(lua_State *L)			/** sub(x,y) */
+int
+Brsh(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_sub(c,a,b);
- return 1;
+	struct Bnum *bn = Bget(L, 1);
+	BIGNUM *a = bn->a;
+	struct Bnum *r = Bnew(L);
+	lua_Number n = lua_tonumber(L, 2);
+
+	if (bn->m && !(r->m = BN_dup(bn->m))
+		return Berror(L, "BN_dup failed");
+
+	if (!(n == 1? BN_rshift1(r->a, a) : BN_rshift(r->a, a, n)))
+		return Berror(L, "BN_rshift");
+
+	return 1;
 }
 
-static int Bmul(lua_State *L)			/** mul(x,y) */
+int
+Badd(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_mul(c,a,b,ctx);
- return 1;
+	struct Bnum *bn = Bget(L, 1);
+	BIGNUM *a = bn->a;
+	struct Bnum *r = Bnew(L);
+
+	if (bn->m && !(r->m = BN_dup(bn->m))
+		return Berror(L, "BN_dup failed");
+
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		// TODO r->m
+		if (!(r->a = BN_copy(r->a, bn->a))
+			return Berror(L, "BN_copy failed");
+		if (!(BN_add_word(r->a, n)))
+			return Berror(L, "BN_add_word");
+	} else {
+		BIGNUM *b = Bget(L, 2)->a;
+		if (!(r->m? BN_mod_add(r->a, a, b, m, ctx) :
+			    BN_add(r->a, a, b)))
+			return Berror(L, r->m? "BN_mod_add" : "BN_add");
+	}
+	return 1;
 }
 
-static int Bdiv(lua_State *L)			/** div(x,y) */
+int
+Bsub(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *q=Bnew(L);
- BIGNUM *r=NULL;
- BN_div(q,r,a,b,ctx);
- return 1;
+	struct Bnum *bn = Bget(L, 1);
+	BIGNUM *a = bn->a;
+	struct Bnum *r = Bnew(L);
+
+	if (bn->m && !(r->m = BN_dup(bn->m))
+		return Berror(L, "BN_dup failed");
+
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		// TODO r->m
+		if (!(r->a = BN_copy(r->a, bn->a))
+			return Berror(L, "BN_copy failed");
+		if (!(BN_sub_word(r->a, n)))
+			return Berror(L, "BN_sub_word");
+	} else {
+		BIGNUM *b = Bget(L, 2)->a;
+		if (!(r->m? BN_mod_sub(r->a, a, b, m, ctx) :
+			    BN_sub(r->a, a, b)))
+			return Berror(L, r->m? "BN_mod_sub" : "BN_sub");
+	}
+	return 1;
 }
+
+int
+Bmul(lua_State *L)
+{
+	struct Bnum *bn = Bget(L, 1);
+	BIGNUM *a = bn->a;
+	struct Bnum *r = Bnew(L);
+
+	if (bn->m && !(r->m = BN_dup(bn->m))
+		return Berror(L, "BN_dup failed");
+
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		// TODO r->m
+		if (!(r->a = BN_copy(r->a, bn->a))
+			return Berror(L, "BN_copy failed");
+		if (!(BN_mul_word(r->a, n)))
+			return Berror(L, "BN_mul_word");
+	} else {
+		BIGNUM *b = Bget(L, 2)->a;
+		if (!(r->m? BN_mod_mul(r->a, a, b, m, ctx) :
+			    BN_mul(r->a, a, b, ctx)))
+			return Berror(L, r->m? "BN_mod_mul" : "BN_mul");
+	}
+	return 1;
+}
+
+int
+Bdiv(lua_State *L)
+{
+	struct Bnum *r = Bnew(L);
+
+	if (lua_isnumber(L, 1)) {
+		struct Bnum *bn = Bget(L, 2);
+		BIGNUM *b = bn->a;
+		lua_Number n = lua_tonumber(L, 2);
+
+		if (bn->m && !(r->m = BN_dup(bn->m))
+			return Berror(L, "BN_dup failed");
+
+		if (n != 1 || !r->m)
+			return Berror(L, "inverse: bad args");
+
+		if (!BN_mod_inverse(r->a, b, r->m, ctx))
+			return Berror(L, "BN_mod_inverse");
+	} else if (lua_isnumber(L, 2)) {
+		struct Bnum *bn = Bget(L, 1);
+		BIGNUM *a = bn->a;
+		lua_Number n = lua_tonumber(L, 2);
+
+		if (bn->m && !(r->m = BN_dup(bn->m))
+			return Berror(L, "BN_dup failed");
+
+		// TODO r->m
+		if (!(r->a = BN_copy(r->a, bn->a))
+			return Berror(L, "BN_copy failed");
+		if (!(BN_div_word(r->a, n)))
+			return Berror(L, "BN_div_word");
+	} else {
+		struct Bnum *bn = Bget(L, 1);
+		BIGNUM *a = bn->a;
+		BIGNUM *b = Bget(L, 2)->a;
+
+		if (bn->m && !(r->m = BN_dup(bn->m))
+			return Berror(L, "BN_dup failed");
+
+		if (!(r->m? BN_mod_div(r->a, a, b, m, ctx) :
+			    BN_div(r->a, a, b, ctx)))
+			return Berror(L, r->m? "BN_mod_div" : "BN_div");
+	}
+	return 1;
+}
+
+
 
 static int Bmod(lua_State *L)			/** mod(x,y) */
 {
@@ -266,16 +387,6 @@ static int Brmod(lua_State *L)			/** rmod(x,y) */
  return 1;
 }
 
-static int Bdivmod(lua_State *L)		/** divmod(x,y) */
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *q=Bnew(L);
- BIGNUM *r=Bnew(L);
- BN_div(q,r,a,b,ctx);
- return 2;
-}
-
 static int Bgcd(lua_State *L)			/** gcd(x,y) */
 {
  BIGNUM *a=Bget(L,1);
@@ -285,168 +396,105 @@ static int Bgcd(lua_State *L)			/** gcd(x,y) */
  return 1;
 }
 
-static int Bpow(lua_State *L)			/** pow(x,y) */
+int
+Bpow(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_exp(c,a,b,ctx);
- return 1;
+	struct Bnum *bn = Bget(L, 1);
+	BIGNUM *a = bn->a;
+	BIGNUM *r = Bnew(L);
+
+	if (bn->m && !(r->m = BN_dup(bn->m))
+		return Berror(L, "BN_dup failed");
+
+	if (lua_isnumber(L, 2)) {
+		lua_Number n = lua_tonumber(L, 2);
+		if (n == 2)
+			if (!(r->m? BN_mod_sqr(r, a, r->m, ctx) :
+				    BN_sqr(r, a, ctx)))
+				return Berror(L, r->m? BN_mod_sqr : BN_sqr);
+		else
+			;	// TODO
+	} else {
+		BIGNUM *p = Bget(L, 2)->a;
+		if (!(r->m? BN_mod_exp(r, a, r->m, p, ctx) :
+			    BN_exp(r, a, p, ctx)))
+			return Berror(L, r->m? "BN_mod_exp" : "BN_exp");
+	}
+	return 1;
 }
 
-static int Baddmod(lua_State *L)		/** addmod(x,y,m) */
+int
+Brandom(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *m=Bget(L,3);
- BIGNUM *c=Bnew(L);
- BN_mod_add(c,a,b,m,ctx);
- return 1;
+	int bits = luaL_optint(L,1,32);
+	BIGNUM *x = Bnew(L)->a;
+	BN_rand(x, bits, -1, 0);
+	return 1;
 }
 
-static int Bsubmod(lua_State *L)		/** submod(x,y,m) */
+int
+Bprime(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *m=Bget(L,3);
- BIGNUM *c=Bnew(L);
- BN_mod_sub(c,a,b,m,ctx);
- return 1;
+	int bits = luaL_optint(L,1,32);
+	BIGNUM *x = Bnew(L)->a;
+	BN_generate_prime(x, bits, 0, NULL, NULL, NULL, NULL);
+	return 1;
 }
 
-static int Bmulmod(lua_State *L)		/** mulmod(x,y,m) */
+int
+Bisprime(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *m=Bget(L,3);
- BIGNUM *c=Bnew(L);
- BN_mod_mul(c,a,b,m,ctx);
- return 1;
+	int checks = luaL_optint(L, 2, BN_prime_checks);
+	BIGNUM *a = Bget(L,1)->a;
+	lua_pushboolean(L, BN_is_prime_fasttest(a, checks, NULL, ctx, NULL, 1));
+	return 1;
 }
 
-static int Bpowmod(lua_State *L)		/** powmod(x,y,m) */
+int
+Bgc(lua_State *L)
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *b=Bget(L,2);
- BIGNUM *m=Bget(L,3);
- BIGNUM *c=Bnew(L);
- BN_mod_exp(c,a,b,m,ctx);
- return 1;
+	struct Bnum *bn = Bget(L, 1);
+	BN_free(bn->a);
+	if (bn->m)
+		BN_free(bn->m);
+	lua_pushnil(L);
+	lua_setmetatable(L, 1);
+	return 0;
 }
 
-static int Bsqrmod(lua_State *L)		/** sqrmod(x) */
+static const luaL_Reg Bapi[] =
 {
- BIGNUM *a=Bget(L,1);
- BIGNUM *m=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_mod_sqr(c,a,m,ctx);
- return 1;
-}
-
-static int Binvmod(lua_State *L)		/** invmod(x) */
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *m=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_mod_inverse(c,a,m,ctx);
- return 1;
-}
-
-static int Bsqrtmod(lua_State *L)		/** sqrtmod(x) */
-{
- BIGNUM *a=Bget(L,1);
- BIGNUM *m=Bget(L,2);
- BIGNUM *c=Bnew(L);
- BN_mod_sqrt(c,a,m,ctx);
- return 1;
-}
-
-static int Brandom(lua_State *L)		/** random(bits) */
-{
- int bits=luaL_optint(L,1,32);
- BIGNUM *x=Bnew(L);
- BN_rand(x,bits,-1,0);
- return 1;
-}
-
-static int Baprime(lua_State *L)		/** aprime(bits) */
-{
- int bits=luaL_optint(L,1,32);
- BIGNUM *x=Bnew(L);
- BN_generate_prime(x,bits,0,NULL,NULL,NULL,NULL);
- return 1;
-}
-
-static int Bisprime(lua_State *L)		/** isprime(x,[checks]) */
-{
- int checks=luaL_optint(L,2,BN_prime_checks);
- BIGNUM *a=Bget(L,1);
- lua_pushboolean(L,BN_is_prime_fasttest(a,checks,NULL,ctx,NULL,1));
- return 1;
-}
-
-static int Bgc(lua_State *L)
-{
- BIGNUM *a=Bget(L,1);
- BN_free(a);
- lua_pushnil(L);
- lua_setmetatable(L,1);
- return 0;
-}
-
-static const luaL_Reg R[] =
-{
-	{ "__add",	Badd	},		/** __add(x,y) */
-	{ "__div",	Bdiv	},		/** __div(x,y) */
-	{ "__eq",	Beq	},		/** __eq(x,y) */
+	{ "__index",	Bapi    },
+	{ "__add",	Badd	},
+	{ "__div",	Bdiv	},
+	{ "__idiv",	Bgcd	},
+	{ "__eq",	Beq	},
 	{ "__gc",	Bgc	},
-	{ "__lt",	Blt	},		/** __lt(x,y) */
-	{ "__mod",	Bmod	},		/** __mod(x,y) */
-	{ "__mul",	Bmul	},		/** __mul(x,y) */
-	{ "__pow",	Bpow	},		/** __pow(x,y) */
-	{ "__sub",	Bsub	},		/** __sub(x,y) */
-	{ "__tostring",	Btostring},		/** __tostring(x) */
-	{ "__unm",	Bneg	},		/** __unm(x) */
+	{ "__len",	Blen	},
+	{ "__le",	Ble	},
+	{ "__lt",	Blt	},
+	{ "__lsh",	Blsh	},
+	{ "__rsh",	Brsh	},
+	{ "__mod",	Bmod	},
+	{ "__mul",	Bmul	},
+	{ "__pow",	Bpow	},
+	{ "__sub",	Bsub	},
+	{ "__tostring",	Btostr  },
+	{ "__unm",	Bneg	},
+
 	{ "abs",	Babs	},
-	{ "add",	Badd	},
-	{ "addmod",	Baddmod	},
-	{ "aprime",	Baprime	},
-	{ "bits",	Bbits	},
-	{ "compare",	Bcompare},
-	{ "div",	Bdiv	},
-	{ "divmod",	Bdivmod	},
-	{ "gcd",	Bgcd	},
-	{ "invmod",	Binvmod	},
-	{ "isneg",	Bisneg	},
-	{ "isodd",	Bisodd	},
-	{ "isone",	Bisone	},
 	{ "isprime",	Bisprime},
-	{ "iszero",	Biszero	},
-	{ "mod",	Bmod	},
-	{ "mul",	Bmul	},
-	{ "mulmod",	Bmulmod	},
-	{ "neg",	Bneg	},
-	{ "number",	Bnumber	},
-	{ "pow",	Bpow	},
-	{ "powmod",	Bpowmod	},
+	{ "prime",	Bprime	},
 	{ "random",	Brandom	},
 	{ "rmod",	Brmod	},
-	{ "sqr",	Bsqr	},
-	{ "sqrmod",	Bsqrmod	},
-	{ "sqrtmod",	Bsqrtmod},
-	{ "sub",	Bsub	},
-	{ "submod",	Bsubmod	},
-	{ "text",	Btext	},
-	{ "tohex",	Btohex	},
-	{ "totext",	Btotext	},
-	{ "tonumber",	Btonumber},
-	{ "tostring",	Btostring},
+	{ "setmod",	Bsetmod	},
 	{ NULL,		NULL	}
 };
 
-LUALIB_API int luaopen_bn(lua_State *L)
+LUALIB_API int
+luaopen_bn(lua_State *L)
 {
- ctx=BN_CTX_new();
+ ctx = BN_CTX_new();
  ERR_load_BN_strings();
  RAND_seed(MYVERSION, sizeof(MYVERSION));
  luaL_newmetatable(L,MYTYPE);
